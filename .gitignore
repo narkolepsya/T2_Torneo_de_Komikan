@@ -1,13 +1,9 @@
-# Archivos generados por compilacion
 *.o
 *.d
 *.out
-
-# Ejecutable del torneo
-/torneo
-
-# Directorio de compilacion
-/build/
-
-# Archivos temporales
 *.tmp
+
+/torneo
+/prueba_tablero
+/prueba_visual
+/build/
