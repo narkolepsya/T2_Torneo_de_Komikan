@@ -12,6 +12,10 @@ struct Posicion {
     int columna;
 };
 
+struct DisposicionInicial {
+    array<Posicion, 13> posiciones{};
+};
+
 class Tablero {
 public:
     static constexpr int filas = 7;
@@ -23,6 +27,9 @@ public:
     static constexpr int ultimo_perro = 12;
 
     Tablero();
+
+    bool cargarDisposicion(const DisposicionInicial& disposicion);
+    bool buscarFicha(int id, Posicion& resultado) const;
 
     bool esPosicionValida(int fila, int columna) const;
     bool sonAdyacentes(Posicion origen, Posicion destino) const;

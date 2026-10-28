@@ -12,6 +12,54 @@ Tablero::Tablero() {
     inicializarTablero();
 }
 
+bool Tablero::cargarDisposicion(const DisposicionInicial& disposicion) {
+    for (int fila = 0; fila < filas; fila++) {
+        for (int columna = 0; columna < columnas; columna++) {
+            if (esPosicionValida(fila, columna) && posiciones[fila][columna] != vacia) {
+                return false;
+            }
+        }
+    }
+
+    bool ocupadas[filas][columnas]{};
+
+    for (const Posicion& posicion : disposicion.posiciones) {
+        if (!esPosicionValida(posicion.fila, posicion.columna)) {
+            return false;
+        }
+
+        if (ocupadas[posicion.fila][posicion.columna]) {
+            return false;
+        }
+
+        ocupadas[posicion.fila][posicion.columna] = true;
+    }
+
+    for (int id = puma; id <= ultimo_perro; id++) {
+        const Posicion& posicion = disposicion.posiciones[id];
+        posiciones[posicion.fila][posicion.columna] = id;
+    }
+
+    return true;
+}
+
+bool Tablero::buscarFicha(int id, Posicion& resultado) const {
+    if (id < puma || id > ultimo_perro) {
+        return false;
+    }
+
+    for (int fila = 0; fila < filas; fila++) {
+        for (int columna = 0; columna < columnas; columna++) {
+            if (posiciones[fila][columna] == id) {
+                resultado = {fila, columna};
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 void Tablero::inicializarTablero() {
     for (int fila = 0; fila < filas; fila++) {
         for (int columna = 0; columna < columnas; columna++) {
@@ -149,8 +197,8 @@ void Tablero::imprimirTablero(ostream& salida) const {
     }
 
     salida << "\nPosiciones especiales: T=(0,2), SI=(1,1), SD=(1,3)\n";
-    salida << "[  .] : casilla vacia\n";
-    salida << "[  P] : Puma (0)\n";
-    salida << "[  1] a [ 12] : Perros\n";
+    salida << "[.] : casilla vacia\n";
+    salida << "[P] : Puma (0)\n";
+    salida << "[1] a [12] : Perros\n";
     salida << "+ : cruce de lineas sin posicion\n";
 }
