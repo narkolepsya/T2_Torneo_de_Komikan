@@ -30,6 +30,7 @@ public:
 
     bool cargarDisposicion(const DisposicionInicial& disposicion);
     bool buscarFicha(int id, Posicion& resultado) const;
+    bool moverFicha(int id, Posicion origen, Posicion destino);
 
     bool esPosicionValida(int fila, int columna) const;
     bool sonAdyacentes(Posicion origen, Posicion destino) const;

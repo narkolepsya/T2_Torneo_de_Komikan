@@ -60,6 +60,27 @@ bool Tablero::buscarFicha(int id, Posicion& resultado) const {
     return false;
 }
 
+bool Tablero::moverFicha(int id, Posicion origen, Posicion destino) {
+    if (id < puma || id > ultimo_perro) {
+        return false;
+    }
+
+    if (!esPosicionValida(origen.fila, origen.columna) ||
+        !esPosicionValida(destino.fila, destino.columna)) {
+        return false;
+    }
+
+    if (posiciones[origen.fila][origen.columna] != id ||
+        !sonAdyacentes(origen, destino) ||
+        posiciones[destino.fila][destino.columna] != vacia) {
+        return false;
+    }
+
+    posiciones[origen.fila][origen.columna] = vacia;
+    posiciones[destino.fila][destino.columna] = id;
+    return true;
+}
+
 void Tablero::inicializarTablero() {
     for (int fila = 0; fila < filas; fila++) {
         for (int columna = 0; columna < columnas; columna++) {
