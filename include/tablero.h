@@ -31,6 +31,7 @@ public:
     bool cargarDisposicion(const DisposicionInicial& disposicion);
     bool buscarFicha(int id, Posicion& resultado) const;
     bool moverFicha(int id, Posicion origen, Posicion destino);
+    bool capturarPerro(Posicion origen, Posicion intermedio, Posicion destino, int& idCapturado);
 
     bool esPosicionValida(int fila, int columna) const;
     bool sonAdyacentes(Posicion origen, Posicion destino) const;
@@ -44,6 +45,9 @@ private:
     int posiciones[filas][columnas];
 
     static const ListaAdyacencia adyacencias;
+    static const vector<vector<Posicion>> lineasCaptura;
+    static vector<vector<Posicion>> crearLineasCaptura();
+    bool esTrayectoriaCaptura(Posicion origen, Posicion intermedio, Posicion destino) const;
     static ListaAdyacencia crearAdyacencias();
     static void conectar(ListaAdyacencia& conexiones, Posicion origen,
                          Posicion destino);

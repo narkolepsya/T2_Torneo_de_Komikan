@@ -7,6 +7,7 @@
 using namespace std;
 
 const Tablero::ListaAdyacencia Tablero::adyacencias = Tablero::crearAdyacencias();
+const vector<vector<Posicion>> Tablero::lineasCaptura = Tablero::crearLineasCaptura();
 
 Tablero::Tablero() {
     inicializarTablero();
@@ -79,6 +80,91 @@ bool Tablero::moverFicha(int id, Posicion origen, Posicion destino) {
     posiciones[origen.fila][origen.columna] = vacia;
     posiciones[destino.fila][destino.columna] = id;
     return true;
+}
+
+bool Tablero::capturarPerro(Posicion origen, Posicion intermedio, Posicion destino, int& idCapturado) {
+    if (!esPosicionValida(origen.fila, origen.columna) ||
+        !esPosicionValida(intermedio.fila, intermedio.columna) ||
+        !esPosicionValida(destino.fila, destino.columna)) {
+        return false;
+    }
+
+    if (posiciones[origen.fila][origen.columna] != puma ||
+        !esTrayectoriaCaptura(origen, intermedio, destino)) {
+        return false;
+    }
+
+    int perro = posiciones[intermedio.fila][intermedio.columna];
+
+    if (perro < primer_perro || perro > ultimo_perro ||
+        posiciones[destino.fila][destino.columna] != vacia) {
+        return false;
+    }
+
+    posiciones[origen.fila][origen.columna] = vacia;
+    posiciones[intermedio.fila][intermedio.columna] = vacia;
+    posiciones[destino.fila][destino.columna] = puma;
+    idCapturado = perro;
+    return true;
+}
+
+bool Tablero::esTrayectoriaCaptura(Posicion origen, Posicion intermedio, Posicion destino) const {
+    if (!sonAdyacentes(origen, intermedio) || !sonAdyacentes(intermedio, destino)) {
+        return false;
+    }
+
+    auto mismaPosicion = [](Posicion primera, Posicion segunda) {
+        return primera.fila == segunda.fila && primera.columna == segunda.columna;
+    };
+
+    for (const vector<Posicion>& linea : lineasCaptura) {
+        for (size_t inicio = 0; inicio + 2 < linea.size(); inicio++) {
+            if (!mismaPosicion(intermedio, linea[inicio + 1])) {
+                continue;
+            }
+
+            if ((mismaPosicion(origen, linea[inicio]) && mismaPosicion(destino, linea[inicio + 2])) ||
+                (mismaPosicion(destino, linea[inicio]) && mismaPosicion(origen, linea[inicio + 2]))) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+vector<vector<Posicion>> Tablero::crearLineasCaptura() {
+    vector<vector<Posicion>> lineas;
+
+    for (int fila = 2; fila < filas; fila++) {
+        vector<Posicion> linea;
+
+        for (int columna = 0; columna < columnas; columna++) {
+            linea.push_back({fila, columna});
+        }
+
+        lineas.push_back(linea);
+    }
+
+    for (int columna = 0; columna < columnas; columna++) {
+        vector<Posicion> linea;
+
+        if (columna == 1 || columna == 3) {
+            linea.push_back({1, columna});
+        } else if (columna == 2) {
+            linea.push_back({0, 2});
+        }
+
+        for (int fila = 2; fila < filas; fila++) {
+            linea.push_back({fila, columna});
+        }
+
+        lineas.push_back(linea);
+    }
+
+    lineas.push_back({{0, 2}, {1, 1}, {2, 0}});
+    lineas.push_back({{0, 2}, {1, 3}, {2, 4}});
+    return lineas;
 }
 
 void Tablero::inicializarTablero() {
