@@ -108,6 +108,51 @@ bool Tablero::capturarPerro(Posicion origen, Posicion intermedio, Posicion desti
     return true;
 }
 
+bool Tablero::tieneMovimientosPuma() const {
+    Posicion origen;
+
+    if (!buscarFicha(puma, origen)) {
+        return false;
+    }
+
+    for (const Posicion& vecino : obtenerVecinos(origen.fila, origen.columna)) {
+        int ocupacion = posiciones[vecino.fila][vecino.columna];
+
+        if (ocupacion == vacia) {
+            return true;
+        }
+
+        if (ocupacion < primer_perro || ocupacion > ultimo_perro) {
+            continue;
+        }
+
+        for (const Posicion& destino : obtenerVecinos(vecino.fila, vecino.columna)) {
+            if (posiciones[destino.fila][destino.columna] == vacia &&
+                esTrayectoriaCaptura(origen, vecino, destino)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+int Tablero::contarPerrosRestantes() const {
+    int cantidad = 0;
+
+    for (int fila = 0; fila < filas; fila++) {
+        for (int columna = 0; columna < columnas; columna++) {
+            int ocupacion = posiciones[fila][columna];
+
+            if (ocupacion >= primer_perro && ocupacion <= ultimo_perro) {
+                cantidad++;
+            }
+        }
+    }
+
+    return cantidad;
+}
+
 bool Tablero::esTrayectoriaCaptura(Posicion origen, Posicion intermedio, Posicion destino) const {
     if (!sonAdyacentes(origen, intermedio) || !sonAdyacentes(intermedio, destino)) {
         return false;

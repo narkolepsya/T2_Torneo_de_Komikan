@@ -32,6 +32,8 @@ public:
     bool buscarFicha(int id, Posicion& resultado) const;
     bool moverFicha(int id, Posicion origen, Posicion destino);
     bool capturarPerro(Posicion origen, Posicion intermedio, Posicion destino, int& idCapturado);
+    bool tieneMovimientosPuma() const;
+    int contarPerrosRestantes() const;
 
     bool esPosicionValida(int fila, int columna) const;
     bool sonAdyacentes(Posicion origen, Posicion destino) const;
