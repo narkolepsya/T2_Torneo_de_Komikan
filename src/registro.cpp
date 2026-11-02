@@ -81,6 +81,10 @@ const char* nombreMotivo(MotivoRegistro motivo) {
         case MotivoRegistro::ErrorCreacionHilo: return "error_creacion_hilo";
         case MotivoRegistro::ErrorEjecucion: return "error_ejecucion";
         case MotivoRegistro::ErrorRegistro: return "error_registro";
+        case MotivoRegistro::AbandonoPuma: return "abandono_puma";
+        case MotivoRegistro::AbandonoPerros: return "abandono_perros";
+        case MotivoRegistro::FalloJugadorPuma: return "fallo_jugador_puma";
+        case MotivoRegistro::FalloJugadorPerros: return "fallo_jugador_perros";
     }
     return "desconocido";
 }

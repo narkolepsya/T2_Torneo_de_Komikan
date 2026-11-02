@@ -24,6 +24,10 @@ MotivoRegistro traducirMotivo(MotivoFinalizacion motivo) {
         case MotivoFinalizacion::PumaAcorralado: return MotivoRegistro::PumaAcorralado;
         case MotivoFinalizacion::ErrorRegistro: return MotivoRegistro::ErrorRegistro;
         case MotivoFinalizacion::Interrupcion: return MotivoRegistro::Interrupcion;
+        case MotivoFinalizacion::AbandonoPuma: return MotivoRegistro::AbandonoPuma;
+        case MotivoFinalizacion::AbandonoPerros: return MotivoRegistro::AbandonoPerros;
+        case MotivoFinalizacion::FalloJugadorPuma: return MotivoRegistro::FalloJugadorPuma;
+        case MotivoFinalizacion::FalloJugadorPerros: return MotivoRegistro::FalloJugadorPerros;
     }
     return MotivoRegistro::Ninguno;
 }
@@ -112,7 +116,9 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     tablero = Tablero();
     Tablero comprobacion;
 
-    if (idMesa < 0 || idPartida < 0 || nuevaConfiguracion.retardoMinimo < 0 ||
+    if (opcionesRegistro.identidad.jugadorPuma < 0 || opcionesRegistro.identidad.jugadorPerros < 0 ||
+        opcionesRegistro.identidad.jugadorPuma == opcionesRegistro.identidad.jugadorPerros ||
+        idMesa < 0 || idPartida < 0 || nuevaConfiguracion.retardoMinimo < 0 ||
         nuevaConfiguracion.retardoMaximo < nuevaConfiguracion.retardoMinimo ||
         !comprobacion.cargarDisposicion(nuevaConfiguracion.disposicionInicial)) {
         estado.fase = FasePartida::Finalizada;
@@ -121,6 +127,8 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
         return false;
     }
 
+    estado.jugadorPuma = opcionesRegistro.identidad.jugadorPuma;
+    estado.jugadorPerros = opcionesRegistro.identidad.jugadorPerros;
     configuracion = nuevaConfiguracion;
 
     try {
@@ -276,6 +284,29 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     return true;
 }
 
+bool Juego::notificarAbandono(int idJugador, CausaAbandono causa) {
+    if (!monitor.inicializado ||
+        (causa != CausaAbandono::Desconexion && causa != CausaAbandono::FalloInterno)) {
+        return false;
+    }
+
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    bool aceptado = estado.fase == FasePartida::EnCurso &&
+        estado.resultado.motivo == MotivoFinalizacion::SinFinalizar &&
+        (idJugador == estado.jugadorPuma || idJugador == estado.jugadorPerros);
+
+    if (aceptado) {
+        bool esPuma = idJugador == estado.jugadorPuma;
+        MotivoFinalizacion motivo = causa == CausaAbandono::Desconexion ?
+            (esPuma ? MotivoFinalizacion::AbandonoPuma : MotivoFinalizacion::AbandonoPerros) :
+            (esPuma ? MotivoFinalizacion::FalloJugadorPuma : MotivoFinalizacion::FalloJugadorPerros);
+        finalizarConBloqueo(esPuma ? GanadorPartida::Perros : GanadorPartida::Puma, motivo);
+    }
+
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return aceptado;
+}
+
 void Juego::solicitarCierre(MotivoFinalizacion motivo) {
     if (!monitor.inicializado) {
         return;
@@ -397,8 +428,11 @@ void* Juego::ejecutarFicha(void* argumento) {
         }
     } catch (...) {
         comprobarPosix(pthread_mutex_lock(&juego.monitor.mutexMonitor));
-        juego.finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::ErrorEjecucion);
+        int jugador = contexto.idFicha == Tablero::puma ? juego.estado.jugadorPuma : juego.estado.jugadorPerros;
         comprobarPosix(pthread_mutex_unlock(&juego.monitor.mutexMonitor));
+        if (!juego.notificarAbandono(jugador, CausaAbandono::FalloInterno)) {
+            juego.solicitarCierre(MotivoFinalizacion::ErrorEjecucion);
+        }
     }
 
     juego.terminarParticipante(contexto.idFicha);

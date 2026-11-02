@@ -79,7 +79,11 @@ enum class MotivoRegistro {
     ErrorPreparacion,
     ErrorCreacionHilo,
     ErrorEjecucion,
-    ErrorRegistro
+    ErrorRegistro,
+    AbandonoPuma,
+    AbandonoPerros,
+    FalloJugadorPuma,
+    FalloJugadorPerros
 };
 
 struct EventoRegistro {

@@ -32,7 +32,16 @@ enum class MotivoFinalizacion {
     SeisCapturas,
     PumaAcorralado,
     ErrorRegistro,
-    Interrupcion
+    Interrupcion,
+    AbandonoPuma,
+    AbandonoPerros,
+    FalloJugadorPuma,
+    FalloJugadorPerros
+};
+
+enum class CausaAbandono {
+    Desconexion,
+    FalloInterno
 };
 
 struct ResultadoPartida {
@@ -43,6 +52,8 @@ struct ResultadoPartida {
 struct EstadoJuego {
     FasePartida fase = FasePartida::SinIniciar;
     ResultadoPartida resultado;
+    int jugadorPuma = 1;
+    int jugadorPerros = 2;
     int hilosCreados = 0;
     int hilosPreparados = 0;
     int hilosIniciados = 0;
@@ -94,6 +105,7 @@ public:
 
     bool iniciar(const Config& configuracion, int idMesa, int idPartida, string& error, bool movimientosAutomaticos = true,
                  const OpcionesRegistro& opcionesRegistro = OpcionesRegistro());
+    bool notificarAbandono(int idJugador, CausaAbandono causa = CausaAbandono::Desconexion);
     void solicitarCierre(MotivoFinalizacion motivo = MotivoFinalizacion::CierreSolicitado);
     bool esperarFinalizacion(ResultadoPartida& resultado, string& error);
     bool obtenerInstantanea(Tablero& resultado);
