@@ -1,6 +1,8 @@
 #ifndef ARBITRO_H
 #define ARBITRO_H
 
+#include "tablero.h"
+
 #include <pthread.h>
 #include <queue>
 
@@ -10,7 +12,8 @@ enum EstadoRespuesta {
     Pendiente,
     Aprobado,
     Rechazado,
-    PartidaTerminada
+    PartidaTerminada,
+    FichaCapturada
 };
 
 struct SolicitudMovimiento {
@@ -19,11 +22,14 @@ struct SolicitudMovimiento {
     int columnaOrigen;
     int filaDestino;
     int columnaDestino;
+    TipoMovimiento tipo = TipoMovimiento::Simple;
+    Posicion intermedio = {-1, -1};
 };
 
 struct BuzonFicha {
     bool solicitudPendiente = false;
     bool solicitudRecibida = false;
+    bool retirada = false;
     EstadoRespuesta respuesta = Pendiente;
     pthread_cond_t condicion;
 };
@@ -47,5 +53,11 @@ EstadoRespuesta enviarSolicitudBloqueante(MonitorArbitro& monitor, const Solicit
 bool recibirSolicitud(MonitorArbitro& monitor, SolicitudMovimiento& solicitud);
 void responderSolicitud(MonitorArbitro& monitor, int idFicha, EstadoRespuesta respuesta);
 void finalizarPartida(MonitorArbitro& monitor);
+
+EstadoRespuesta enviarSolicitudConBloqueo(MonitorArbitro& monitor, const SolicitudMovimiento& solicitud);
+bool recibirSolicitudConBloqueo(MonitorArbitro& monitor, SolicitudMovimiento& solicitud);
+void responderSolicitudConBloqueo(MonitorArbitro& monitor, int idFicha, EstadoRespuesta respuesta);
+void retirarFichaConBloqueo(MonitorArbitro& monitor, int idFicha);
+void finalizarPartidaConBloqueo(MonitorArbitro& monitor);
 
 #endif

@@ -40,6 +40,7 @@ bool inicializarArbitro(MonitorArbitro& monitor) {
         }
         monitor.buzones[i].solicitudPendiente = false;
         monitor.buzones[i].solicitudRecibida = false;
+        monitor.buzones[i].retirada = false;
         monitor.buzones[i].respuesta = Pendiente;
     }
 
@@ -67,27 +68,38 @@ void destruirArbitro(MonitorArbitro& monitor) {
 }
 
 EstadoRespuesta enviarSolicitudBloqueante(MonitorArbitro& monitor, const SolicitudMovimiento& solicitud) {
-    if (solicitud.idFicha < 0 || solicitud.idFicha >= 13 || !monitor.inicializado) {
+    if (!monitor.inicializado) {
         return Rechazado;
     }
 
     comprobarSincronizacion(pthread_mutex_lock(&monitor.mutexMonitor));
+    EstadoRespuesta respuesta = enviarSolicitudConBloqueo(monitor, solicitud);
+    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return respuesta;
+}
+
+EstadoRespuesta enviarSolicitudConBloqueo(MonitorArbitro& monitor, const SolicitudMovimiento& solicitud) {
+    if (solicitud.idFicha < 0 || solicitud.idFicha >= 13) {
+        return Rechazado;
+    }
 
     if (!monitor.partidaActiva) {
-        comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
         return PartidaTerminada;
     }
 
     BuzonFicha& buzon = monitor.buzones[solicitud.idFicha];
+
+    if (buzon.retirada) {
+        return FichaCapturada;
+    }
+
     if (buzon.solicitudPendiente) {
-        comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
         return Rechazado;
     }
 
     try {
         monitor.colaSolicitudes.push(solicitud);
     } catch (const bad_alloc&) {
-        comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
         return Rechazado;
     }
 
@@ -103,7 +115,6 @@ EstadoRespuesta enviarSolicitudBloqueante(MonitorArbitro& monitor, const Solicit
     EstadoRespuesta resultado = buzon.respuesta;
     buzon.solicitudPendiente = false;
     buzon.solicitudRecibida = false;
-    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
     return resultado;
 }
 
@@ -113,38 +124,74 @@ bool recibirSolicitud(MonitorArbitro& monitor, SolicitudMovimiento& solicitud) {
     }
 
     comprobarSincronizacion(pthread_mutex_lock(&monitor.mutexMonitor));
-
-    while (monitor.colaSolicitudes.empty() && monitor.partidaActiva) {
-        comprobarSincronizacion(pthread_cond_wait(&monitor.condicionCola, &monitor.mutexMonitor));
-    }
-
-    if (!monitor.partidaActiva) {
-        comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
-        return false;
-    }
-
-    solicitud = monitor.colaSolicitudes.front();
-    monitor.colaSolicitudes.pop();
-    monitor.buzones[solicitud.idFicha].solicitudRecibida = true;
+    bool recibida = recibirSolicitudConBloqueo(monitor, solicitud);
     comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
-    return true;
+    return recibida;
+}
+
+bool recibirSolicitudConBloqueo(MonitorArbitro& monitor, SolicitudMovimiento& solicitud) {
+    while (monitor.partidaActiva) {
+        while (monitor.colaSolicitudes.empty() && monitor.partidaActiva) {
+            comprobarSincronizacion(pthread_cond_wait(&monitor.condicionCola, &monitor.mutexMonitor));
+        }
+
+        if (!monitor.partidaActiva) {
+            return false;
+        }
+
+        SolicitudMovimiento siguiente = monitor.colaSolicitudes.front();
+        monitor.colaSolicitudes.pop();
+        BuzonFicha& buzon = monitor.buzones[siguiente.idFicha];
+
+        if (buzon.retirada || !buzon.solicitudPendiente || buzon.respuesta != Pendiente) {
+            continue;
+        }
+
+        solicitud = siguiente;
+        buzon.solicitudRecibida = true;
+        return true;
+    }
+
+    return false;
 }
 
 void responderSolicitud(MonitorArbitro& monitor, int idFicha, EstadoRespuesta respuesta) {
-    if (idFicha < 0 || idFicha >= 13 || !monitor.inicializado ||
-        (respuesta != Aprobado && respuesta != Rechazado)) {
+    if (!monitor.inicializado) {
         return;
     }
 
     comprobarSincronizacion(pthread_mutex_lock(&monitor.mutexMonitor));
+    responderSolicitudConBloqueo(monitor, idFicha, respuesta);
+    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
+}
+
+void responderSolicitudConBloqueo(MonitorArbitro& monitor, int idFicha, EstadoRespuesta respuesta) {
+    if (idFicha < 0 || idFicha >= 13 || (respuesta != Aprobado && respuesta != Rechazado)) {
+        return;
+    }
+
     BuzonFicha& buzon = monitor.buzones[idFicha];
 
-    if (monitor.partidaActiva && buzon.solicitudPendiente &&
+    if (monitor.partidaActiva && !buzon.retirada && buzon.solicitudPendiente &&
         buzon.solicitudRecibida && buzon.respuesta == Pendiente) {
         buzon.respuesta = respuesta;
         comprobarSincronizacion(pthread_cond_signal(&buzon.condicion));
     }
-    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
+}
+
+void retirarFichaConBloqueo(MonitorArbitro& monitor, int idFicha) {
+    if (idFicha < 1 || idFicha >= 13) {
+        return;
+    }
+
+    BuzonFicha& buzon = monitor.buzones[idFicha];
+    buzon.retirada = true;
+
+    if (buzon.respuesta == Pendiente) {
+        buzon.respuesta = FichaCapturada;
+    }
+
+    comprobarSincronizacion(pthread_cond_broadcast(&buzon.condicion));
 }
 
 void finalizarPartida(MonitorArbitro& monitor) {
@@ -153,6 +200,11 @@ void finalizarPartida(MonitorArbitro& monitor) {
     }
 
     comprobarSincronizacion(pthread_mutex_lock(&monitor.mutexMonitor));
+    finalizarPartidaConBloqueo(monitor);
+    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
+}
+
+void finalizarPartidaConBloqueo(MonitorArbitro& monitor) {
     monitor.partidaActiva = false;
 
     while (!monitor.colaSolicitudes.empty()) {
@@ -167,5 +219,4 @@ void finalizarPartida(MonitorArbitro& monitor) {
     }
 
     comprobarSincronizacion(pthread_cond_broadcast(&monitor.condicionCola));
-    comprobarSincronizacion(pthread_mutex_unlock(&monitor.mutexMonitor));
 }

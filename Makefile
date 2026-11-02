@@ -15,7 +15,8 @@ SRCS = src/main.cpp \
        src/juego.cpp \
        src/arbitro.cpp \
        src/servidor.cpp \
-       src/config.cpp
+       src/config.cpp \
+       src/registro.cpp
 
 OBJS = $(SRCS:.cpp=.o)
 
