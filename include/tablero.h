@@ -12,6 +12,18 @@ struct Posicion {
     int columna;
 };
 
+enum class TipoMovimiento {
+    Simple,
+    Captura
+};
+
+struct Movimiento {
+    TipoMovimiento tipo = TipoMovimiento::Simple;
+    Posicion origen{};
+    Posicion destino{};
+    Posicion intermedio = {-1, -1};
+};
+
 struct DisposicionInicial {
     array<Posicion, 13> posiciones{};
 };
@@ -32,6 +44,7 @@ public:
     bool buscarFicha(int id, Posicion& resultado) const;
     bool moverFicha(int id, Posicion origen, Posicion destino);
     bool capturarPerro(Posicion origen, Posicion intermedio, Posicion destino, int& idCapturado);
+    vector<Movimiento> obtenerMovimientos(int id) const;
     bool tieneMovimientosPuma() const;
     int contarPerrosRestantes() const;
 

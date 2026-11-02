@@ -1,4 +1,7 @@
 #include "juego.h"
+#include "ficha.h"
+#include <cerrno>
+#include <ctime>
 #include <cstring>
 #include <exception>
 using namespace std;
@@ -8,6 +11,20 @@ void comprobarPosix(int resultado) {
     if (resultado != 0) {
         terminate();
     }
+}
+
+timespec obtenerPlazo(int milisegundos) {
+    timespec plazo;
+    comprobarPosix(clock_gettime(CLOCK_MONOTONIC, &plazo));
+    plazo.tv_sec += milisegundos / 1000;
+    plazo.tv_nsec += (milisegundos % 1000) * 1000000L;
+
+    if (plazo.tv_nsec >= 1000000000L) {
+        plazo.tv_sec++;
+        plazo.tv_nsec -= 1000000000L;
+    }
+
+    return plazo;
 }
 
 }
@@ -26,7 +43,7 @@ Juego::~Juego() {
     }
 }
 
-bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida, string& error) {
+bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida, string& error, bool automaticos) {
     if (arbitroCreado) {
         error = "La partida anterior requiere cierre y join antes de reiniciar";
         return false;
@@ -41,6 +58,10 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
 
     liberarRecursos();
     estado = EstadoJuego();
+    movimientosAutomaticos = automaticos;
+    ejecucionAutorizada = false;
+    versionTablero = 0;
+    ultimoEvento = EventoPartida();
     tablero = Tablero();
     Tablero comprobacion;
 
@@ -88,6 +109,28 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     }
 
     condicionInicializada = true;
+    pthread_condattr_t atributos;
+    codigo = pthread_condattr_init(&atributos);
+
+    if (codigo == 0) {
+        codigo = pthread_condattr_setclock(&atributos, CLOCK_MONOTONIC);
+
+        if (codigo == 0) {
+            codigo = pthread_cond_init(&condicionCambios, &atributos);
+        }
+
+        comprobarPosix(pthread_condattr_destroy(&atributos));
+    }
+
+    if (codigo != 0) {
+        liberarRecursos();
+        estado.fase = FasePartida::Finalizada;
+        estado.resultado.motivo = MotivoFinalizacion::ErrorPreparacion;
+        error = "No se pudo inicializar la condicion monotona: " + string(strerror(codigo));
+        return false;
+    }
+
+    cambiosInicializados = true;
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
     estado.fase = FasePartida::Preparando;
     codigo = pthread_create(&hiloArbitro, nullptr, ejecutarArbitro, this);
@@ -128,7 +171,20 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
         }
     }
 
-    bool iniciado = estado.fase == FasePartida::EnCurso;
+    if (estado.fase == FasePartida::EnCurso) {
+        publicarEventoConBloqueo(TipoEventoPartida::Inicio, -1, Movimiento(), -1, Pendiente);
+        ejecucionAutorizada = true;
+        comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+
+        if (!movimientosAutomaticos) {
+            while (estado.fase == FasePartida::EnCurso &&
+                   estado.hilosEsperandoCierre < cantidadParticipantes) {
+                comprobarPosix(pthread_cond_wait(&condicionEstado, &monitor.mutexMonitor));
+            }
+        }
+    }
+
+    bool iniciado = estado.inicioAutorizado;
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
 
     if (!iniciado) {
@@ -162,17 +218,8 @@ void Juego::solicitarCierre() {
 
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
 
-    if (estado.fase != FasePartida::Finalizada) {
-        estado.fase = FasePartida::Cerrando;
-
-        if (estado.resultado.motivo == MotivoFinalizacion::SinFinalizar) {
-            estado.resultado.motivo = MotivoFinalizacion::CierreSolicitado;
-        }
-    }
-
-    comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+    finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::CierreSolicitado);
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
-    finalizarPartida(monitor);
 }
 
 bool Juego::esperarFinalizacion(ResultadoPartida& resultado, string& error) {
@@ -259,6 +306,11 @@ void Juego::obtenerEstado(EstadoJuego& resultado) {
 }
 
 void Juego::liberarRecursos() {
+    if (cambiosInicializados) {
+        comprobarPosix(pthread_cond_destroy(&condicionCambios));
+        cambiosInicializados = false;
+    }
+
     if (condicionInicializada) {
         comprobarPosix(pthread_cond_destroy(&condicionEstado));
         condicionInicializada = false;
@@ -269,17 +321,40 @@ void Juego::liberarRecursos() {
 
 void* Juego::ejecutarFicha(void* argumento) {
     ContextoFichaJuego& contexto = *static_cast<ContextoFichaJuego*>(argumento);
-    contexto.juego->esperarInicioYCierre(false);
+    Juego& juego = *contexto.juego;
+
+    try {
+        if (juego.esperarInicio(false)) {
+            juego.cicloFicha(contexto);
+        }
+    } catch (...) {
+        comprobarPosix(pthread_mutex_lock(&juego.monitor.mutexMonitor));
+        juego.finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::ErrorEjecucion);
+        comprobarPosix(pthread_mutex_unlock(&juego.monitor.mutexMonitor));
+    }
+
+    juego.terminarParticipante(contexto.idFicha);
     return nullptr;
 }
 
 void* Juego::ejecutarArbitro(void* argumento) {
     Juego& juego = *static_cast<Juego*>(argumento);
-    juego.esperarInicioYCierre(true);
+
+    try {
+        if (juego.esperarInicio(true)) {
+            juego.cicloArbitro();
+        }
+    } catch (...) {
+        comprobarPosix(pthread_mutex_lock(&juego.monitor.mutexMonitor));
+        juego.finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::ErrorEjecucion);
+        comprobarPosix(pthread_mutex_unlock(&juego.monitor.mutexMonitor));
+    }
+
+    juego.terminarParticipante(-1);
     return nullptr;
 }
 
-void Juego::esperarInicioYCierre(bool esArbitro) {
+bool Juego::esperarInicio(bool esArbitro) {
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
 
     if (esArbitro && estado.fase == FasePartida::Preparando &&
@@ -297,17 +372,291 @@ void Juego::esperarInicioYCierre(bool esArbitro) {
 
     if (estado.inicioAutorizado && estado.fase == FasePartida::EnCurso) {
         estado.hilosIniciados++;
-        estado.hilosEsperandoCierre++;
         comprobarPosix(pthread_cond_broadcast(&condicionEstado));
 
-        while (estado.fase == FasePartida::EnCurso) {
+        while (estado.fase == FasePartida::EnCurso && !ejecucionAutorizada) {
             comprobarPosix(pthread_cond_wait(&condicionEstado, &monitor.mutexMonitor));
         }
-
-        estado.hilosEsperandoCierre--;
     }
 
-    estado.hilosTerminados++;
-    comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+    bool activo = estado.fase == FasePartida::EnCurso;
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return activo;
+}
+
+void Juego::terminarParticipante(int idFicha) {
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    estado.hilosTerminados++;
+
+    if (idFicha >= 0) {
+        estado.fichasTerminadas[idFicha] = true;
+    }
+
+    comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+    comprobarPosix(pthread_cond_broadcast(&condicionCambios));
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+}
+
+bool Juego::esperarRetardoConBloqueo(int idFicha, int milisegundos) {
+    timespec plazo = obtenerPlazo(milisegundos);
+    Posicion posicion;
+    estado.hilosEsperandoCierre++;
+    comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+
+    while (estado.fase == FasePartida::EnCurso && tablero.buscarFicha(idFicha, posicion)) {
+        int codigo = pthread_cond_timedwait(&condicionCambios, &monitor.mutexMonitor, &plazo);
+
+        if (codigo == ETIMEDOUT) {
+            break;
+        }
+
+        comprobarPosix(codigo);
+    }
+
+    estado.hilosEsperandoCierre--;
+    return estado.fase == FasePartida::EnCurso && tablero.buscarFicha(idFicha, posicion);
+}
+
+void Juego::cicloFicha(ContextoFichaJuego& contexto) {
+    int id = contexto.idFicha;
+
+    while (true) {
+        int retardo = movimientosAutomaticos ?
+            generarRetardo(contexto.generador, configuracion.retardoMinimo, configuracion.retardoMaximo) : 0;
+        Tablero instantanea;
+        uint64_t version;
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+        Posicion posicion;
+
+        if (!movimientosAutomaticos) {
+            estado.hilosEsperandoCierre++;
+            comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+
+            while (estado.fase == FasePartida::EnCurso && tablero.buscarFicha(id, posicion)) {
+                comprobarPosix(pthread_cond_wait(&condicionCambios, &monitor.mutexMonitor));
+            }
+
+            estado.hilosEsperandoCierre--;
+            comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+            return;
+        }
+
+        bool activo = esperarRetardoConBloqueo(id, retardo);
+        version = versionTablero;
+        instantanea = tablero;
+        comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+
+        if (!activo) {
+            return;
+        }
+
+        vector<Movimiento> candidatas = instantanea.obtenerMovimientos(id);
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+        estado.consultasPorFicha[id]++;
+        estado.sinCandidatas[id] = candidatas.empty();
+
+        if (candidatas.empty()) {
+            estado.hilosEsperandoCierre++;
+            comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+
+            while (estado.fase == FasePartida::EnCurso && version == versionTablero &&
+                   tablero.buscarFicha(id, posicion)) {
+                comprobarPosix(pthread_cond_wait(&condicionCambios, &monitor.mutexMonitor));
+            }
+
+            estado.hilosEsperandoCierre--;
+            comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+            continue;
+        }
+
+        comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+        uniform_int_distribution<size_t> seleccion(0, candidatas.size() - 1);
+        EstadoRespuesta respuesta = solicitarMovimiento(id, candidatas[seleccion(contexto.generador)]);
+
+        if (respuesta == PartidaTerminada || respuesta == FichaCapturada) {
+            return;
+        }
+    }
+}
+
+EstadoRespuesta Juego::solicitarMovimiento(int idFicha, const Movimiento& movimiento) {
+    if (idFicha < 0 || idFicha >= cantidadFichas || !monitor.inicializado) {
+        return Rechazado;
+    }
+
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    EstadoRespuesta respuesta;
+    Posicion actual;
+
+    if (estado.fase != FasePartida::EnCurso) {
+        respuesta = PartidaTerminada;
+    } else if (!tablero.buscarFicha(idFicha, actual)) {
+        respuesta = FichaCapturada;
+    } else if (monitor.buzones[idFicha].solicitudPendiente) {
+        respuesta = Rechazado;
+    } else {
+        SolicitudMovimiento solicitud{idFicha, movimiento.origen.fila, movimiento.origen.columna,
+                                     movimiento.destino.fila, movimiento.destino.columna,
+                                     movimiento.tipo, movimiento.intermedio};
+        estado.solicitudesPorFicha[idFicha]++;
+        respuesta = enviarSolicitudConBloqueo(monitor, solicitud);
+    }
+
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return respuesta;
+}
+
+void Juego::cicloArbitro() {
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    evaluarVictoriaConBloqueo();
+
+    while (estado.fase == FasePartida::EnCurso) {
+        estado.hilosEsperandoCierre++;
+        comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+        SolicitudMovimiento solicitud;
+        bool recibida = recibirSolicitudConBloqueo(monitor, solicitud);
+        estado.hilosEsperandoCierre--;
+
+        if (!recibida || estado.fase != FasePartida::EnCurso) {
+            break;
+        }
+
+        Movimiento movimiento{solicitud.tipo, {solicitud.filaOrigen, solicitud.columnaOrigen},
+                              {solicitud.filaDestino, solicitud.columnaDestino}, solicitud.intermedio};
+        bool aceptada = false;
+        int capturado = -1;
+
+        if (movimiento.tipo == TipoMovimiento::Simple) {
+            aceptada = tablero.moverFicha(solicitud.idFicha, movimiento.origen, movimiento.destino);
+        } else if (movimiento.tipo == TipoMovimiento::Captura && solicitud.idFicha == Tablero::puma) {
+            aceptada = tablero.capturarPerro(movimiento.origen, movimiento.intermedio,
+                                            movimiento.destino, capturado);
+        }
+
+        EstadoRespuesta respuesta = aceptada ? Aprobado : Rechazado;
+
+        if (aceptada) {
+            estado.accionesAceptadas++;
+            versionTablero++;
+
+            if (capturado >= Tablero::primer_perro) {
+                retirarFichaConBloqueo(monitor, capturado);
+            }
+        } else {
+            estado.accionesRechazadas++;
+        }
+
+        responderSolicitudConBloqueo(monitor, solicitud.idFicha, respuesta);
+        publicarEventoConBloqueo(TipoEventoPartida::Accion, solicitud.idFicha, movimiento,
+                                 capturado, respuesta);
+        evaluarVictoriaConBloqueo();
+        comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    }
+
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+}
+
+void Juego::evaluarVictoriaConBloqueo() {
+    if (estado.fase != FasePartida::EnCurso) {
+        return;
+    }
+
+    Posicion puma;
+
+    if (!tablero.buscarFicha(Tablero::puma, puma)) {
+        finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::ErrorEjecucion);
+    } else if (Tablero::ultimo_perro - tablero.contarPerrosRestantes() >= 6) {
+        finalizarConBloqueo(GanadorPartida::Puma, MotivoFinalizacion::SeisCapturas);
+    } else if (!tablero.tieneMovimientosPuma()) {
+        finalizarConBloqueo(GanadorPartida::Perros, MotivoFinalizacion::PumaAcorralado);
+    }
+}
+
+void Juego::finalizarConBloqueo(GanadorPartida ganador, MotivoFinalizacion motivo) {
+    if (estado.fase == FasePartida::Finalizada) {
+        return;
+    }
+
+    bool nuevo = estado.fase != FasePartida::Cerrando || monitor.partidaActiva;
+    estado.fase = FasePartida::Cerrando;
+
+    if (estado.resultado.motivo == MotivoFinalizacion::SinFinalizar) {
+        estado.resultado = {ganador, motivo};
+    }
+
+    finalizarPartidaConBloqueo(monitor);
+    versionTablero++;
+    comprobarPosix(pthread_cond_broadcast(&condicionEstado));
+    comprobarPosix(pthread_cond_broadcast(&condicionCambios));
+
+    if (nuevo) {
+        publicarEventoConBloqueo(TipoEventoPartida::Cierre, -1, Movimiento(), -1, PartidaTerminada);
+    }
+}
+
+void Juego::publicarEventoConBloqueo(TipoEventoPartida tipo, int idFicha,
+                                    const Movimiento& movimiento, int idCapturado,
+                                    EstadoRespuesta respuesta) {
+    ultimoEvento.secuencia = ++estado.secuenciaEvento;
+    ultimoEvento.tipo = tipo;
+    ultimoEvento.idFicha = idFicha;
+    ultimoEvento.movimiento = movimiento;
+    ultimoEvento.idCapturado = idCapturado;
+    ultimoEvento.respuesta = respuesta;
+    ultimoEvento.resultado = estado.resultado;
+    ultimoEvento.tablero = tablero;
+    comprobarPosix(pthread_cond_broadcast(&condicionCambios));
+}
+
+bool Juego::esperarSalidaFicha(int idFicha, int milisegundos) {
+    if (!monitor.inicializado || idFicha < 0 || idFicha >= cantidadFichas || milisegundos < 0) {
+        return false;
+    }
+
+    timespec plazo = obtenerPlazo(milisegundos);
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+
+    while (!estado.fichasTerminadas[idFicha]) {
+        int codigo = pthread_cond_timedwait(&condicionCambios, &monitor.mutexMonitor, &plazo);
+
+        if (codigo == ETIMEDOUT) {
+            break;
+        }
+
+        comprobarPosix(codigo);
+    }
+
+    bool termino = estado.fichasTerminadas[idFicha];
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return termino;
+}
+
+bool Juego::esperarEvento(uint64_t anterior, EventoPartida& resultado, int milisegundos) {
+    if (!monitor.inicializado || milisegundos < 0) {
+        return false;
+    }
+
+    timespec plazo = obtenerPlazo(milisegundos);
+    comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+
+    while (estado.secuenciaEvento <= anterior && estado.fase == FasePartida::EnCurso) {
+        int codigo = pthread_cond_timedwait(&condicionCambios, &monitor.mutexMonitor, &plazo);
+
+        if (codigo == ETIMEDOUT) {
+            break;
+        }
+
+        comprobarPosix(codigo);
+    }
+
+    bool disponible = estado.secuenciaEvento > anterior;
+
+    if (disponible) {
+        resultado = ultimoEvento;
+        resultado.eventosOmitidos = resultado.secuencia - anterior > 1;
+    }
+
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    return disponible;
 }

@@ -108,6 +108,49 @@ bool Tablero::capturarPerro(Posicion origen, Posicion intermedio, Posicion desti
     return true;
 }
 
+vector<Movimiento> Tablero::obtenerMovimientos(int id) const {
+    vector<Movimiento> movimientos;
+    Posicion origen;
+
+    if (!buscarFicha(id, origen)) {
+        return movimientos;
+    }
+
+    for (const Posicion& destino : obtenerVecinos(origen.fila, origen.columna)) {
+        if (posiciones[destino.fila][destino.columna] == vacia) {
+            movimientos.push_back({TipoMovimiento::Simple, origen, destino, {-1, -1}});
+        }
+    }
+
+    if (id != puma) {
+        return movimientos;
+    }
+
+    for (const vector<Posicion>& linea : lineasCaptura) {
+        for (size_t inicio = 0; inicio + 2 < linea.size(); inicio++) {
+            const Posicion& intermedio = linea[inicio + 1];
+            int perro = posiciones[intermedio.fila][intermedio.columna];
+
+            if (perro < primer_perro || perro > ultimo_perro) {
+                continue;
+            }
+
+            for (int sentido = 0; sentido < 2; sentido++) {
+                const Posicion& primero = linea[inicio + (sentido == 0 ? 0 : 2)];
+                const Posicion& destino = linea[inicio + (sentido == 0 ? 2 : 0)];
+
+                if (origen.fila == primero.fila && origen.columna == primero.columna &&
+                    posiciones[destino.fila][destino.columna] == vacia &&
+                    sonAdyacentes(origen, intermedio) && sonAdyacentes(intermedio, destino)) {
+                    movimientos.push_back({TipoMovimiento::Captura, origen, destino, intermedio});
+                }
+            }
+        }
+    }
+
+    return movimientos;
+}
+
 bool Tablero::tieneMovimientosPuma() const {
     Posicion origen;
 
