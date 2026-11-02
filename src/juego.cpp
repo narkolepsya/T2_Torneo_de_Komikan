@@ -13,6 +13,48 @@ void comprobarPosix(int resultado) {
     }
 }
 
+MotivoRegistro traducirMotivo(MotivoFinalizacion motivo) {
+    switch (motivo) {
+        case MotivoFinalizacion::SinFinalizar: return MotivoRegistro::Ninguno;
+        case MotivoFinalizacion::CierreSolicitado: return MotivoRegistro::CierreSolicitado;
+        case MotivoFinalizacion::ErrorPreparacion: return MotivoRegistro::ErrorPreparacion;
+        case MotivoFinalizacion::ErrorCreacionHilo: return MotivoRegistro::ErrorCreacionHilo;
+        case MotivoFinalizacion::ErrorEjecucion: return MotivoRegistro::ErrorEjecucion;
+        case MotivoFinalizacion::SeisCapturas: return MotivoRegistro::SeisCapturas;
+        case MotivoFinalizacion::PumaAcorralado: return MotivoRegistro::PumaAcorralado;
+        case MotivoFinalizacion::ErrorRegistro: return MotivoRegistro::ErrorRegistro;
+        case MotivoFinalizacion::Interrupcion: return MotivoRegistro::Interrupcion;
+    }
+    return MotivoRegistro::Ninguno;
+}
+
+MotivoRegistro motivoRechazo(const Tablero& tablero, int id, const Movimiento& movimiento) {
+    if (movimiento.tipo != TipoMovimiento::Simple && movimiento.tipo != TipoMovimiento::Captura) {
+        return MotivoRegistro::TipoInvalido;
+    }
+    if (!tablero.esPosicionValida(movimiento.origen.fila, movimiento.origen.columna) ||
+        !tablero.esPosicionValida(movimiento.destino.fila, movimiento.destino.columna) ||
+        (movimiento.tipo == TipoMovimiento::Captura &&
+         !tablero.esPosicionValida(movimiento.intermedio.fila, movimiento.intermedio.columna))) {
+        return MotivoRegistro::PosicionInexistente;
+    }
+    if (tablero.obtenerOcupacion(movimiento.origen.fila, movimiento.origen.columna) != id) {
+        return MotivoRegistro::OrigenObsoleto;
+    }
+    if (movimiento.tipo == TipoMovimiento::Captura && id != Tablero::puma) {
+        return MotivoRegistro::CapturaSoloPuma;
+    }
+    if (tablero.obtenerOcupacion(movimiento.destino.fila, movimiento.destino.columna) != Tablero::vacia) {
+        return MotivoRegistro::DestinoOcupado;
+    }
+    if (movimiento.tipo == TipoMovimiento::Simple) {
+        return MotivoRegistro::NoAdyacente;
+    }
+    int intermedio = tablero.obtenerOcupacion(movimiento.intermedio.fila, movimiento.intermedio.columna);
+    return intermedio < Tablero::primer_perro || intermedio > Tablero::ultimo_perro ?
+        MotivoRegistro::IntermedioSinPerro : MotivoRegistro::TrayectoriaInvalida;
+}
+
 timespec obtenerPlazo(int milisegundos) {
     timespec plazo;
     comprobarPosix(clock_gettime(CLOCK_MONOTONIC, &plazo));
@@ -32,18 +74,18 @@ timespec obtenerPlazo(int milisegundos) {
 Juego::~Juego() {
     if (monitor.inicializado) {
         solicitarCierre();
-        ResultadoPartida resultado;
         string error;
 
-        if (!esperarFinalizacion(resultado, error)) {
+        if (!unirHilos(error)) {
             terminate();
         }
-
+        cerrarRegistro(error);
         liberarRecursos();
     }
 }
 
-bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida, string& error, bool automaticos) {
+bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida, string& error, bool automaticos,
+                    const OpcionesRegistro& opcionesRegistro) {
     if (arbitroCreado) {
         error = "La partida anterior requiere cierre y join antes de reiniciar";
         return false;
@@ -58,6 +100,11 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
 
     liberarRecursos();
     estado = EstadoJuego();
+    registroHabilitado = false;
+    registroComenzo = false;
+    cierreEnRegistro = false;
+    reservaRegistro = false;
+    cantidadLote = 0;
     movimientosAutomaticos = automaticos;
     ejecucionAutorizada = false;
     versionTablero = 0;
@@ -131,6 +178,19 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     }
 
     cambiosInicializados = true;
+    if (opcionesRegistro.habilitado) {
+        OpcionesRegistro opciones = opcionesRegistro;
+        opciones.identidad.idMesa = idMesa;
+        opciones.identidad.idPartida = idPartida;
+        opciones.identidad.esTorneo = false;
+        if (!registro.abrir(opciones, configuracion, error, notificarErrorRegistro, this)) {
+            liberarRecursos();
+            estado.fase = FasePartida::Finalizada;
+            estado.resultado.motivo = MotivoFinalizacion::ErrorRegistro;
+            return false;
+        }
+        registroHabilitado = true;
+    }
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
     estado.fase = FasePartida::Preparando;
     codigo = pthread_create(&hiloArbitro, nullptr, ejecutarArbitro, this);
@@ -172,6 +232,7 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     }
 
     if (estado.fase == FasePartida::EnCurso) {
+        inicioPartidaRegistro = tomarTiempoRegistro();
         publicarEventoConBloqueo(TipoEventoPartida::Inicio, -1, Movimiento(), -1, Pendiente);
         ejecucionAutorizada = true;
         comprobarPosix(pthread_cond_broadcast(&condicionEstado));
@@ -193,7 +254,11 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
         string errorLimpieza;
         bool unidos = esperarFinalizacion(resultado, errorLimpieza);
 
-        if (unidos) {
+        bool quedanHilos = arbitroCreado;
+        for (bool creada : fichasCreadas) {
+            quedanHilos = quedanHilos || creada;
+        }
+        if (!quedanHilos) {
             liberarRecursos();
         }
 
@@ -211,14 +276,14 @@ bool Juego::iniciar(const Config& nuevaConfiguracion, int idMesa, int idPartida,
     return true;
 }
 
-void Juego::solicitarCierre() {
+void Juego::solicitarCierre(MotivoFinalizacion motivo) {
     if (!monitor.inicializado) {
         return;
     }
 
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
 
-    finalizarConBloqueo(GanadorPartida::SinGanador, MotivoFinalizacion::CierreSolicitado);
+    finalizarConBloqueo(GanadorPartida::SinGanador, motivo);
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
 }
 
@@ -232,12 +297,15 @@ bool Juego::esperarFinalizacion(ResultadoPartida& resultado, string& error) {
         return false;
     }
 
+    bool guardado = cerrarRegistro(error);
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
     estado.fase = FasePartida::Finalizada;
     resultado = estado.resultado;
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
-    error.clear();
-    return true;
+    if (guardado) {
+        error.clear();
+    }
+    return guardado;
 }
 
 bool Juego::unirHilos(string& error) {
@@ -379,7 +447,7 @@ bool Juego::esperarInicio(bool esArbitro) {
         }
     }
 
-    bool activo = estado.fase == FasePartida::EnCurso;
+    bool activo = estado.fase == FasePartida::EnCurso || (esArbitro && estado.inicioAutorizado);
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
     return activo;
 }
@@ -507,54 +575,79 @@ EstadoRespuesta Juego::solicitarMovimiento(int idFicha, const Movimiento& movimi
 }
 
 void Juego::cicloArbitro() {
+    if (!reservarRegistro()) {
+        return;
+    }
     comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+    agregarRegistroConBloqueo(TipoEventoRegistro::Inicio, -1, Movimiento(), -1, MotivoRegistro::Ninguno);
     evaluarVictoriaConBloqueo();
+    bool terminado = estado.fase != FasePartida::EnCurso;
+    if (terminado) {
+        agregarFinalRegistroConBloqueo();
+    }
+    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+    if (!publicarRegistro() || terminado) {
+        return;
+    }
 
-    while (estado.fase == FasePartida::EnCurso) {
+    while (true) {
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
         estado.hilosEsperandoCierre++;
         comprobarPosix(pthread_cond_broadcast(&condicionEstado));
         SolicitudMovimiento solicitud;
         bool recibida = recibirSolicitudConBloqueo(monitor, solicitud);
         estado.hilosEsperandoCierre--;
+        comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
 
+        if (!reservarRegistro()) {
+            return;
+        }
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
         if (!recibida || estado.fase != FasePartida::EnCurso) {
-            break;
+            agregarFinalRegistroConBloqueo();
+            comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+            publicarRegistro();
+            return;
         }
 
         Movimiento movimiento{solicitud.tipo, {solicitud.filaOrigen, solicitud.columnaOrigen},
                               {solicitud.filaDestino, solicitud.columnaDestino}, solicitud.intermedio};
         bool aceptada = false;
         int capturado = -1;
-
         if (movimiento.tipo == TipoMovimiento::Simple) {
             aceptada = tablero.moverFicha(solicitud.idFicha, movimiento.origen, movimiento.destino);
         } else if (movimiento.tipo == TipoMovimiento::Captura && solicitud.idFicha == Tablero::puma) {
             aceptada = tablero.capturarPerro(movimiento.origen, movimiento.intermedio,
                                             movimiento.destino, capturado);
         }
-
         EstadoRespuesta respuesta = aceptada ? Aprobado : Rechazado;
-
+        MotivoRegistro motivo = aceptada ? MotivoRegistro::Confirmado :
+            motivoRechazo(tablero, solicitud.idFicha, movimiento);
         if (aceptada) {
             estado.accionesAceptadas++;
             versionTablero++;
-
             if (capturado >= Tablero::primer_perro) {
                 retirarFichaConBloqueo(monitor, capturado);
             }
         } else {
             estado.accionesRechazadas++;
         }
-
         responderSolicitudConBloqueo(monitor, solicitud.idFicha, respuesta);
         publicarEventoConBloqueo(TipoEventoPartida::Accion, solicitud.idFicha, movimiento,
                                  capturado, respuesta);
+        agregarRegistroConBloqueo(!aceptada ? TipoEventoRegistro::Rechazo :
+                                  (capturado >= 1 ? TipoEventoRegistro::Captura : TipoEventoRegistro::Movimiento),
+                                  solicitud.idFicha, movimiento, capturado, motivo);
         evaluarVictoriaConBloqueo();
+        terminado = estado.fase != FasePartida::EnCurso;
+        if (terminado) {
+            agregarFinalRegistroConBloqueo();
+        }
         comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
-        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+        if (!publicarRegistro() || terminado) {
+            return;
+        }
     }
-
-    comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
 }
 
 void Juego::evaluarVictoriaConBloqueo() {
@@ -591,6 +684,7 @@ void Juego::finalizarConBloqueo(GanadorPartida ganador, MotivoFinalizacion motiv
     comprobarPosix(pthread_cond_broadcast(&condicionCambios));
 
     if (nuevo) {
+        cierrePartidaRegistro = tomarTiempoRegistro();
         publicarEventoConBloqueo(TipoEventoPartida::Cierre, -1, Movimiento(), -1, PartidaTerminada);
     }
 }
@@ -659,4 +753,117 @@ bool Juego::esperarEvento(uint64_t anterior, EventoPartida& resultado, int milis
 
     comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
     return disponible;
+}
+
+void Juego::notificarErrorRegistro(void* argumento) {
+    static_cast<Juego*>(argumento)->solicitarCierre(MotivoFinalizacion::ErrorRegistro);
+}
+
+bool Juego::reservarRegistro() {
+    cantidadLote = 0;
+    if (!registroHabilitado) {
+        return true;
+    }
+    string error;
+    reservaRegistro = registro.reservar(loteRegistro.size(), error);
+    if (!reservaRegistro) {
+        solicitarCierre(MotivoFinalizacion::ErrorRegistro);
+    }
+    return reservaRegistro;
+}
+
+bool Juego::publicarRegistro() {
+    if (!registroHabilitado) {
+        return true;
+    }
+    string error;
+    bool publicado = registro.publicar(loteRegistro.data(), cantidadLote, loteRegistro.size(), error);
+    if (!publicado) {
+        registro.cancelarReserva(loteRegistro.size());
+        solicitarCierre(MotivoFinalizacion::ErrorRegistro);
+    }
+    reservaRegistro = false;
+    return publicado;
+}
+
+void Juego::agregarRegistroConBloqueo(TipoEventoRegistro tipo, int idFicha,
+                                     const Movimiento& movimiento, int idCapturado, MotivoRegistro motivo) {
+    if (!registroHabilitado) {
+        return;
+    }
+    if (cantidadLote >= loteRegistro.size() || !reservaRegistro) {
+        terminate();
+    }
+    EventoRegistro& evento = loteRegistro[cantidadLote++];
+    evento = EventoRegistro();
+    evento.tipo = tipo;
+    evento.idFicha = idFicha;
+    evento.movimiento = idFicha < 0 ? Movimiento{TipoMovimiento::Simple, {-1, -1}, {-1, -1}, {-1, -1}} : movimiento;
+    evento.idCapturado = idCapturado;
+    evento.motivo = motivo;
+    evento.tiempo = tipo == TipoEventoRegistro::Inicio ? inicioPartidaRegistro : tomarTiempoRegistro();
+    evento.tablero = tablero;
+    evento.resultado = estado.resultado.ganador == GanadorPartida::Puma ? ResultadoRegistro::Puma :
+        (estado.resultado.ganador == GanadorPartida::Perros ? ResultadoRegistro::Perros : ResultadoRegistro::SinGanador);
+    if (tipo == TipoEventoRegistro::Inicio) {
+        registroComenzo = true;
+    }
+}
+
+void Juego::agregarFinalRegistroConBloqueo() {
+    if (!registroHabilitado || cierreEnRegistro) {
+        return;
+    }
+    MotivoRegistro motivo = traducirMotivo(estado.resultado.motivo);
+    if (estado.resultado.ganador != GanadorPartida::SinGanador) {
+        agregarRegistroConBloqueo(TipoEventoRegistro::Victoria, -1, Movimiento(), -1, motivo);
+    } else if (motivo != MotivoRegistro::CierreSolicitado && motivo != MotivoRegistro::Interrupcion) {
+        agregarRegistroConBloqueo(TipoEventoRegistro::Error, -1, Movimiento(), -1, motivo);
+    }
+    agregarRegistroConBloqueo(TipoEventoRegistro::Cierre, -1, Movimiento(), -1, motivo);
+    for (size_t indice = 0; indice < cantidadLote; indice++) {
+        if (loteRegistro[indice].tipo == TipoEventoRegistro::Victoria ||
+            loteRegistro[indice].tipo == TipoEventoRegistro::Error || loteRegistro[indice].tipo == TipoEventoRegistro::Cierre) {
+            loteRegistro[indice].tiempo = cierrePartidaRegistro;
+        }
+    }
+    cierreEnRegistro = true;
+}
+
+bool Juego::cerrarRegistro(string& error) {
+    if (!registroHabilitado) {
+        error.clear();
+        return true;
+    }
+    if (reservaRegistro) {
+        if (cantidadLote != 0) {
+            publicarRegistro();
+        } else {
+            registro.cancelarReserva(loteRegistro.size());
+            reservaRegistro = false;
+        }
+    }
+    EstadoRegistro estadoRegistro;
+    registro.obtenerEstado(estadoRegistro);
+    if (!cierreEnRegistro && !estadoRegistro.fallo && reservarRegistro()) {
+        comprobarPosix(pthread_mutex_lock(&monitor.mutexMonitor));
+        if (!registroComenzo && estado.inicioAutorizado) {
+            agregarRegistroConBloqueo(TipoEventoRegistro::Inicio, -1, Movimiento(), -1, MotivoRegistro::Ninguno);
+        }
+        if (!registroComenzo && estado.resultado.motivo == MotivoFinalizacion::SinFinalizar) {
+            estado.resultado.motivo = MotivoFinalizacion::ErrorPreparacion;
+        }
+        agregarFinalRegistroConBloqueo();
+        comprobarPosix(pthread_mutex_unlock(&monitor.mutexMonitor));
+        publicarRegistro();
+    }
+    return registro.cerrar(error);
+}
+
+string Juego::obtenerRutaRegistro() const {
+    return registroHabilitado ? registro.obtenerRuta() : "";
+}
+
+void Juego::obtenerEstadoRegistro(EstadoRegistro& resultado) {
+    registro.obtenerEstado(resultado);
 }
