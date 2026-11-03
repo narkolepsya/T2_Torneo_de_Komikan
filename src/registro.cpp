@@ -1,4 +1,5 @@
 #include "registro.h"
+#include "consola.h"
 
 #include <cerrno>
 #include <algorithm>
@@ -18,7 +19,6 @@ using namespace std;
 
 namespace {
 
-pthread_mutex_t mutexConsola = PTHREAD_MUTEX_INITIALIZER;
 
 void comprobarRegistro(int codigo) {
     if (codigo != 0) {
@@ -27,9 +27,7 @@ void comprobarRegistro(int codigo) {
 }
 
 void informar(const string& texto, bool error) {
-    comprobarRegistro(pthread_mutex_lock(&mutexConsola));
-    (error ? cerr : cout) << texto << endl;
-    comprobarRegistro(pthread_mutex_unlock(&mutexConsola));
+    imprimirConsola(texto, error);
 }
 
 string fechaUtc(int64_t milisegundos) {
@@ -57,6 +55,7 @@ const char* nombreTipo(TipoEventoRegistro tipo) {
         case TipoEventoRegistro::AsignacionMesa: return "asignacion_mesa";
         case TipoEventoRegistro::LiberacionMesa: return "liberacion_mesa";
         case TipoEventoRegistro::ResultadoPartida: return "resultado_partida";
+        case TipoEventoRegistro::EsperaMesa: return "espera_mesa";
     }
     return "desconocido";
 }
@@ -121,6 +120,10 @@ string posiciones(const Tablero& tablero, bool ocupaciones) {
     return salida.str();
 }
 
+}
+
+const char* nombreMotivoRegistro(MotivoRegistro motivo) {
+    return nombreMotivo(motivo);
 }
 
 TiempoRegistro tomarTiempoRegistro() {
@@ -242,7 +245,11 @@ bool RegistroEventos::abrir(const OpcionesRegistro& opciones, const Config& dato
     cabecera << "KOMIKAN\tversion=1\tambito=" << (identidad.esTorneo ? "torneo" : "partida")
              << "\ttorneo=" << identidad.ejecucion.idTorneo << '\n';
     cabecera << "IDENTIDAD\tpartida=" << identidad.idPartida << "\tmesa=" << identidad.idMesa
-             << "\tjugador_puma=" << identidad.jugadorPuma << "\tjugador_perros=" << identidad.jugadorPerros << '\n';
+             << "\tjugador_puma=" << identidad.jugadorPuma << "\tjugador_perros=" << identidad.jugadorPerros;
+    if (identidad.esTorneo) {
+        cabecera << "\tjugadores=" << identidad.cantidadJugadores << "\tmesas=" << identidad.cantidadMesas;
+    }
+    cabecera << '\n';
     cabecera << "TIEMPO\tinicio_utc=" << fechaUtc(inicio.realMs)
              << "\tinicio_torneo_utc=" << fechaUtc(identidad.ejecucion.inicio.realMs) << '\n';
     cabecera << "CONFIG\tretardo_min_ms=" << configuracion.retardoMinimo
@@ -287,7 +294,7 @@ bool RegistroEventos::abrir(const OpcionesRegistro& opciones, const Config& dato
         return false;
     }
     hiloCreado = true;
-    informar("Registro creado: " + ruta, false);
+    informar("Registro creado: " + (identidad.esTorneo ? ruta : filesystem::path(ruta).filename().string()), false);
     error.clear();
     return true;
 }
@@ -386,8 +393,8 @@ bool RegistroEventos::cerrar(string& error) {
     anunciado = false;
     comprobarRegistro(pthread_mutex_unlock(&mutex));
     if (informarCierre) {
-        informar("Registro guardado: " + ruta + "; duracion=" + to_string(duracionUs) +
-                 " us; resultado=" + nombreResultado(resultadoFinal), false);
+        informar("Registro guardado: " + filesystem::path(ruta).filename().string() + "; duracion=" + formatearDuracion(duracionUs) +
+                 "; resultado=" + nombreResultado(resultadoFinal), false);
     }
     return completo;
 }
@@ -529,8 +536,12 @@ void RegistroEventos::escribirEventos() {
               << "\tdestino=" << evento.movimiento.destino.fila << ',' << evento.movimiento.destino.columna
               << "\tretirado=" << evento.idCapturado << "\tresultado=" << nombreResultado(evento.resultado)
               << "\tmotivo=" << nombreMotivo(evento.motivo) << "\taceptados=" << aceptados
-              << "\trechazados=" << rechazados << "\tcapturas=" << capturas
-              << "\tocupaciones=" << posiciones(evento.tablero, true) << '\n';
+              << "\trechazados=" << rechazados << "\tcapturas=" << capturas;
+        if (identidad.esTorneo) {
+            linea << "\tmesas_activas=" << evento.mesasActivas
+                  << "\tparejas_esperando=" << evento.parejasEsperando;
+        }
+        linea << "\tocupaciones=" << posiciones(evento.tablero, true) << '\n';
         if (!escribirTexto(linea.str())) {
             break;
         }
@@ -540,6 +551,7 @@ void RegistroEventos::escribirEventos() {
         comprobarRegistro(pthread_mutex_lock(&mutex));
         estado.eventosEscritos++;
         comprobarRegistro(pthread_mutex_unlock(&mutex));
+        presentarEvento(evento, identidad, secuencia, tiempoUs);
     }
     if (!final) {
         fallar("No se pudo completar el evento de cierre de " + ruta);

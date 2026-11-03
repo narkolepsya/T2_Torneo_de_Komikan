@@ -16,7 +16,8 @@ SRCS = src/main.cpp \
        src/arbitro.cpp \
        src/servidor.cpp \
        src/config.cpp \
-       src/registro.cpp
+       src/registro.cpp \
+       src/consola.cpp
 
 OBJS = $(SRCS:.cpp=.o)
 
@@ -24,6 +25,8 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) $(OBJS) -o $(TARGET) $(LDLIBS)
+
+$(OBJS): $(wildcard $(INCLUDE)/*.h)
 
 src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -pthread -c $< -o $@

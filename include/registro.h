@@ -32,6 +32,8 @@ struct IdentidadRegistro {
     int jugadorPuma = 1;
     int jugadorPerros = 2;
     bool esTorneo = false;
+    int cantidadJugadores = 0;
+    int cantidadMesas = 0;
 };
 
 struct OpcionesRegistro {
@@ -52,7 +54,8 @@ enum class TipoEventoRegistro {
     Emparejamiento,
     AsignacionMesa,
     LiberacionMesa,
-    ResultadoPartida
+    ResultadoPartida,
+    EsperaMesa
 };
 
 enum class ResultadoRegistro {
@@ -86,6 +89,8 @@ enum class MotivoRegistro {
     FalloJugadorPerros
 };
 
+const char* nombreMotivoRegistro(MotivoRegistro motivo);
+
 struct EventoRegistro {
     TipoEventoRegistro tipo = TipoEventoRegistro::Inicio;
     MotivoRegistro motivo = MotivoRegistro::Ninguno;
@@ -98,6 +103,8 @@ struct EventoRegistro {
     int idMesa = -1;
     int jugador1 = -1;
     int jugador2 = -1;
+    int mesasActivas = -1;
+    int parejasEsperando = -1;
     Tablero tablero;
 };
 
